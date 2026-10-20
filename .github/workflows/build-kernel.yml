@@ -1,0 +1,181 @@
+name: Build Kernel (OriginSU)
+
+# Builds the Exynos850 (Galaxy A13 / SM-A135F) 4.19 kernel against the
+# *latest* OriginSU commit, using the Neutron toolchain.
+#
+# The kernel-side integration (manual hooks + SELinux symbol exports +
+# defconfig) lives in .github/originsu/kernel-integration.diff, so this repo
+# stays close to the vendor tree while OriginSU always tracks its latest
+# main branch at build time.
+
+on:
+  workflow_dispatch:
+    inputs:
+      originsu_repo:
+        description: 'OriginSU repository (owner/name)'
+        required: false
+        default: 'samakshkambxj/OriginSU'
+      originsu_ref:
+        description: 'OriginSU ref: branch, tag or commit (default: latest main)'
+        required: false
+        default: 'main'
+      defconfig:
+        description: 'Kernel defconfig name'
+        required: false
+        default: 'exynos850-a13nsxx_defconfig'
+  push:
+    branches: [originsu, lineage-24.0]
+    paths-ignore:
+      - '**/*.md'
+  pull_request:
+    branches: [originsu, lineage-24.0]
+    paths-ignore:
+      - '**/*.md'
+  schedule:
+    # Weekly: rebuild automatically to pick up new OriginSU commits.
+    - cron: '0 3 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-kernel-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ARCH: arm64
+  OUT: out
+
+jobs:
+  build:
+    name: Build exynos850 kernel + OriginSU
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex \
+            libssl-dev libelf-dev libncurses-dev \
+            binutils-aarch64-linux-gnu gcc-aarch64-linux-gnu \
+            lz4 zstd cpio rsync xz-utils zip unzip curl git
+
+      - name: Set up Neutron Clang
+        run: |
+          mkdir -p "$HOME/toolchains/neutron-clang"
+          cd "$HOME/toolchains/neutron-clang"
+          curl -fsSLO "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman"
+          chmod +x antman
+          ./antman -S
+          echo "$HOME/toolchains/neutron-clang/bin" >> "$GITHUB_PATH"
+          "$HOME/toolchains/neutron-clang/bin/clang" --version | head -1
+
+      - name: Fetch OriginSU (latest commit)
+        id: originsu
+        run: |
+          set -euo pipefail
+          REPO="${{ github.event.inputs.originsu_repo || 'samakshkambxj/OriginSU' }}"
+          REF="${{ github.event.inputs.originsu_ref || 'main' }}"
+
+          rm -rf KernelSU
+          git clone "https://github.com/${REPO}.git" KernelSU
+          cd KernelSU
+          git fetch --tags --force origin
+
+          # Prefer remote-tracking branch, fall back to tag/commit.
+          if git rev-parse --verify --quiet "origin/${REF}" >/dev/null; then
+            git checkout --force "origin/${REF}"
+          else
+            git checkout --force "${REF}"
+          fi
+          git submodule update --init --recursive || true
+
+          SHA="$(git rev-parse HEAD)"
+          SHORT="$(git rev-parse --short=12 HEAD)"
+          SUBJECT="$(git log -1 --format='%s')"
+          echo "sha=${SHA}"       >> "$GITHUB_OUTPUT"
+          echo "short=${SHORT}"   >> "$GITHUB_OUTPUT"
+          echo "repo=${REPO}"     >> "$GITHUB_OUTPUT"
+          echo "ref=${REF}"       >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### OriginSU"
+            echo ""
+            echo "- repo: \`${REPO}\`"
+            echo "- ref: \`${REF}\`"
+            echo "- commit: [\`${SHORT}\`](https://github.com/${REPO}/commit/${SHA})"
+            echo "- subject: ${SUBJECT}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Apply OriginSU kernel integration
+        run: |
+          set -euo pipefail
+          if git apply --check .github/originsu/kernel-integration.diff 2>/dev/null; then
+            git apply --verbose .github/originsu/kernel-integration.diff
+          else
+            echo "::warning::Integration patch did not apply cleanly (already applied or tree changed); continuing."
+          fi
+          ln -sfn ../KernelSU/kernel drivers/kernelsu
+          ls -l drivers/kernelsu
+          grep -n "CONFIG_KSU=y\|CONFIG_KSU_MANUAL_HOOK=y\|CONFIG_LOCALVERSION" \
+            arch/arm64/configs/${{ github.event.inputs.defconfig || 'exynos850-a13nsxx_defconfig' }}
+
+      - name: Configure kernel
+        run: |
+          set -euo pipefail
+          make -j"$(nproc)" ARCH="$ARCH" O="$OUT" LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- CLANG_TRIPLE=aarch64-linux-gnu- \
+            ${{ github.event.inputs.defconfig || 'exynos850-a13nsxx_defconfig' }}
+
+          # Fail early if OriginSU did not end up enabled.
+          grep -q '^CONFIG_KSU=y' "$OUT/.config"
+          grep -q '^CONFIG_KSU_MANUAL_HOOK=y' "$OUT/.config"
+          grep -q '^CONFIG_LOCALVERSION="-exynos850-Origin"' "$OUT/.config"
+
+      - name: Build kernel
+        run: |
+          set -euo pipefail
+          make -j"$(nproc)" ARCH="$ARCH" O="$OUT" LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- CLANG_TRIPLE=aarch64-linux-gnu-
+
+      - name: Verify image + OriginSU symbols
+        run: |
+          set -euo pipefail
+          test -f "$OUT/arch/arm64/boot/Image"
+          echo "kernel.release: $(cat "$OUT/include/config/kernel.release")"
+          grep -q 'exynos850-Origin' "$OUT/include/config/kernel.release"
+          echo "ksu_* symbols in System.map: $(grep -c ' ksu_' "$OUT/System.map" || true)"
+          echo "OriginSU commit: ${{ steps.originsu.outputs.short }}"
+
+      - name: Collect artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          cp "$OUT/arch/arm64/boot/Image"          artifacts/ 2>/dev/null || true
+          cp "$OUT/arch/arm64/boot/Image.gz"       artifacts/ 2>/dev/null || true
+          cp "$OUT/System.map"                     artifacts/ 2>/dev/null || true
+          cp "$OUT/.config"                        artifacts/config
+          cp "$OUT/include/config/kernel.release"  artifacts/ 2>/dev/null || true
+          find "$OUT/arch/arm64/boot/dts" -name '*.dtb'  -exec cp {} artifacts/ \; 2>/dev/null || true
+          find "$OUT/arch/arm64/boot/dts" -name '*.dtbo' -exec cp {} artifacts/ \; 2>/dev/null || true
+          # Modules -> tarball to keep the artifact tidy.
+          if find "$OUT" -name '*.ko' | grep -q .; then
+            ( cd "$OUT" && find . -name '*.ko' -print0 | tar --null -T - -czf "$OLDPWD/artifacts/modules.tar.gz" )
+          fi
+          ls -lh artifacts
+
+      - name: Upload kernel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: exynos850-Origin-kernel-${{ steps.originsu.outputs.short }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 14

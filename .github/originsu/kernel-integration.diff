@@ -1,0 +1,254 @@
+diff --git a/arch/arm64/configs/exynos850-a13nsxx_defconfig b/arch/arm64/configs/exynos850-a13nsxx_defconfig
+index d5b2a1680..17f732f32 100644
+--- a/arch/arm64/configs/exynos850-a13nsxx_defconfig
++++ b/arch/arm64/configs/exynos850-a13nsxx_defconfig
+@@ -31,7 +31,7 @@ CONFIG_THREAD_INFO_IN_TASK=y
+ #
+ CONFIG_INIT_ENV_ARG_LIMIT=32
+ # CONFIG_COMPILE_TEST is not set
+-CONFIG_LOCALVERSION="-exynos850"
++CONFIG_LOCALVERSION="-exynos850-Origin"
+ # CONFIG_LOCALVERSION_AUTO is not set
+ CONFIG_BUILD_SALT=""
+ CONFIG_HAVE_KERNEL_GZIP=y
+@@ -650,6 +650,20 @@ CONFIG_MODULE_UNLOAD=y
+ CONFIG_MODVERSIONS=y
+ # CONFIG_MODULE_SRCVERSION_ALL is not set
+ # CONFIG_MODULE_SIG is not set
++
++#
++# KernelSU
++#
++CONFIG_KSU=y
++CONFIG_KSU_MANUAL_HOOK=y
++# CONFIG_KSU_TRACEPOINT_HOOK is not set
++# CONFIG_KSU_TAMPER_SYSCALL_TABLE is not set
++CONFIG_KSU_ORIGIN_VEIL=y
++CONFIG_KSU_MULTI_MANAGER_SUPPORT=y
++CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK=y
++CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK=y
++CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK=y
++
+ # CONFIG_MODULE_COMPRESS is not set
+ # CONFIG_TRIM_UNUSED_KSYMS is not set
+ CONFIG_MODULES_TREE_LOOKUP=y
+diff --git a/drivers/Kconfig b/drivers/Kconfig
+index 9eb3492af..5ed460257 100644
+--- a/drivers/Kconfig
++++ b/drivers/Kconfig
+@@ -264,4 +264,5 @@ source "drivers/sensorhub/sensor/Kconfig" # ADDED BY LEGO AUTOMATICALLY: DO NOT
+ source "drivers/sensorhub/sensorhub/Kconfig" # ADDED BY LEGO AUTOMATICALLY: DO NOT SUBMIT
+ source "drivers/sensorhub/vendor/Kconfig" # ADDED BY LEGO AUTOMATICALLY: DO NOT SUBMIT
+ source "drivers/sensors_lego/Kconfig" # ADDED BY LEGO AUTOMATICALLY: DO NOT SUBMIT
++source "drivers/kernelsu/Kconfig"
+ endmenu
+diff --git a/drivers/Makefile b/drivers/Makefile
+index c469deff9..ecd4627a5 100644
+--- a/drivers/Makefile
++++ b/drivers/Makefile
+@@ -228,3 +228,5 @@ obj-y += vibrator/dc/ # ADDED BY LEGO AUTOMATICALLY: DO NOT SUBMIT
+ obj-y += battery/common/ # ADDED BY LEGO AUTOMATICALLY: DO NOT SUBMIT
+ obj-y += sensorhub/ # ADDED BY LEGO AUTOMATICALLY: DO NOT SUBMIT
+ obj-y += sensors_lego/ # ADDED BY LEGO AUTOMATICALLY: DO NOT SUBMIT
++
++obj-$(CONFIG_KSU) += kernelsu/
+diff --git a/fs/exec.c b/fs/exec.c
+index bf7eaf60f..b620f222a 100644
+--- a/fs/exec.c
++++ b/fs/exec.c
+@@ -1912,12 +1912,33 @@ static int __do_execve_file(int fd, struct filename *filename,
+ 	return retval;
+ }
+ 
++#ifdef CONFIG_KSU_MANUAL_HOOK
++__attribute__((hot))
++extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,
++				void *argv, void *envp, int *flags);
++__attribute__((hot))
++extern int ksu_handle_post_execveat(int *fd, struct filename **filename_ptr,
++				void *argv, void *envp, int *flags, int *retval);
++#endif
++
+ static int do_execveat_common(int fd, struct filename *filename,
+ 			      struct user_arg_ptr argv,
+ 			      struct user_arg_ptr envp,
+ 			      int flags)
+ {
++#ifdef CONFIG_KSU_MANUAL_HOOK
++	int retval;
++
++	ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
++
++	retval = __do_execve_file(fd, filename, argv, envp, flags, NULL);
++
++	ksu_handle_post_execveat(&fd, &filename, &argv, &envp, &flags, &retval);
++
++	return retval;
++#else
+ 	return __do_execve_file(fd, filename, argv, envp, flags, NULL);
++#endif
+ }
+ 
+ int do_execve_file(struct file *file, void *__argv, void *__envp)
+diff --git a/fs/open.c b/fs/open.c
+index ad3400989..a7106323c 100644
+--- a/fs/open.c
++++ b/fs/open.c
+@@ -444,8 +444,17 @@ long do_faccessat(int dfd, const char __user *filename, int mode)
+ 	return res;
+ }
+ 
++#ifdef CONFIG_KSU_MANUAL_HOOK
++__attribute__((hot))
++extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,
++				int *mode, int *flags);
++#endif
++
+ SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
+ {
++#ifdef CONFIG_KSU_MANUAL_HOOK
++	ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
++#endif
+ 	return do_faccessat(dfd, filename, mode);
+ }
+ 
+diff --git a/fs/stat.c b/fs/stat.c
+index 376543199..7399476a2 100644
+--- a/fs/stat.c
++++ b/fs/stat.c
+@@ -353,6 +353,17 @@ SYSCALL_DEFINE2(newlstat, const char __user *, filename,
+ 	return cp_new_stat(&stat, statbuf);
+ }
+ 
++#ifdef CONFIG_KSU_MANUAL_HOOK
++__attribute__((hot))
++extern int ksu_handle_stat(int *dfd, const char __user **filename_user,
++				int *flags);
++
++extern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);
++#if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)
++extern void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_ptr);
++#endif
++#endif
++
+ #if !defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_SYS_NEWFSTATAT)
+ SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
+ 		struct stat __user *, statbuf, int, flag)
+@@ -360,6 +371,9 @@ SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
+ 	struct kstat stat;
+ 	int error;
+ 
++#ifdef CONFIG_KSU_MANUAL_HOOK
++	ksu_handle_stat(&dfd, &filename, &flag);
++#endif
+ 	error = vfs_fstatat(dfd, filename, &stat, flag);
+ 	if (error)
+ 		return error;
+@@ -375,6 +389,9 @@ SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)
+ 	if (!error)
+ 		error = cp_new_stat(&stat, statbuf);
+ 
++#ifdef CONFIG_KSU_MANUAL_HOOK
++	ksu_handle_newfstat_ret(&fd, &statbuf);
++#endif
+ 	return error;
+ }
+ 
+@@ -501,6 +518,9 @@ SYSCALL_DEFINE2(fstat64, unsigned long, fd, struct stat64 __user *, statbuf)
+ 	if (!error)
+ 		error = cp_new_stat64(&stat, statbuf);
+ 
++#ifdef CONFIG_KSU_MANUAL_HOOK /* for 32-bit */
++	ksu_handle_fstat64_ret(&fd, &statbuf);
++#endif
+ 	return error;
+ }
+ 
+@@ -510,6 +530,9 @@ SYSCALL_DEFINE4(fstatat64, int, dfd, const char __user *, filename,
+ 	struct kstat stat;
+ 	int error;
+ 
++#ifdef CONFIG_KSU_MANUAL_HOOK /* 32-bit su */
++	ksu_handle_stat(&dfd, &filename, &flag);
++#endif
+ 	error = vfs_fstatat(dfd, filename, &stat, flag);
+ 	if (error)
+ 		return error;
+diff --git a/kernel/reboot.c b/kernel/reboot.c
+index d0660c245..b3292df3d 100644
+--- a/kernel/reboot.c
++++ b/kernel/reboot.c
+@@ -313,6 +313,10 @@ DEFINE_MUTEX(system_transition_mutex);
+  *
+  * reboot doesn't sync: do that yourself before calling this.
+  */
++#ifdef CONFIG_KSU_MANUAL_HOOK
++extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);
++#endif
++
+ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
+ 		void __user *, arg)
+ {
+@@ -320,6 +324,9 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
+ 	char buffer[256];
+ 	int ret = 0;
+ 
++#ifdef CONFIG_KSU_MANUAL_HOOK
++	ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);
++#endif
+ 	/* We only trust the superuser with rebooting the system. */
+ 	if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))
+ 		return -EPERM;
+diff --git a/security/selinux/selinuxfs.c b/security/selinux/selinuxfs.c
+index d93fd1a98..d48e633f6 100644
+--- a/security/selinux/selinuxfs.c
++++ b/security/selinux/selinuxfs.c
+@@ -265,7 +265,7 @@ static int sel_mmap_handle_status(struct file *filp,
+ 			       size, vma->vm_page_prot);
+ }
+ 
+-static const struct file_operations sel_handle_status_ops = {
++const struct file_operations sel_handle_status_ops = {
+ 	.open		= sel_open_handle_status,
+ 	.read		= sel_read_handle_status,
+ 	.mmap		= sel_mmap_handle_status,
+@@ -777,7 +777,7 @@ static ssize_t sel_write_relabel(struct file *file, char *buf, size_t size);
+ static ssize_t sel_write_user(struct file *file, char *buf, size_t size);
+ static ssize_t sel_write_member(struct file *file, char *buf, size_t size);
+ 
+-static ssize_t (*const write_op[])(struct file *, char *, size_t) = {
++ssize_t (*const write_op[])(struct file *, char *, size_t) = {
+ 	[SEL_ACCESS] = sel_write_access,
+ 	[SEL_CREATE] = sel_write_create,
+ 	[SEL_RELABEL] = sel_write_relabel,
+diff --git a/security/selinux/ss/services.c b/security/selinux/ss/services.c
+index 083fb29d2..6cbc313e3 100644
+--- a/security/selinux/ss/services.c
++++ b/security/selinux/ss/services.c
+@@ -94,7 +94,7 @@ static int context_struct_to_string(struct policydb *policydb,
+ 				    char **scontext,
+ 				    u32 *scontext_len);
+ 
+-static void context_struct_compute_av(struct policydb *policydb,
++void context_struct_compute_av(struct policydb *policydb,
+ 				      struct context *scontext,
+ 				      struct context *tcontext,
+ 				      u16 tclass,
+@@ -453,7 +453,7 @@ static int dump_masked_av_helper(void *k, void *d, void *args)
+ 	return 0;
+ }
+ 
+-static void security_dump_masked_av(struct policydb *policydb,
++void security_dump_masked_av(struct policydb *policydb,
+ 				    struct context *scontext,
+ 				    struct context *tcontext,
+ 				    u16 tclass,
+@@ -615,7 +615,7 @@ void services_compute_xperms_drivers(
+  * Compute access vectors and extended permissions based on a context
+  * structure pair for the permissions in a particular class.
+  */
+-static void context_struct_compute_av(struct policydb *policydb,
++void context_struct_compute_av(struct policydb *policydb,
+ 				      struct context *scontext,
+ 				      struct context *tcontext,
+ 				      u16 tclass,
