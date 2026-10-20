@@ -186,6 +186,9 @@ jobs:
 
           sed -i 's/extern __attribute__((cold)) int ksu_handle_sys_read(unsigned int fd);/extern __attribute__((cold)) int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *count_ptr);/' fs/read_write.c
           sed -i 's/ksu_handle_sys_read(fd);/ksu_handle_sys_read(fd, \&buf, \&count);/' fs/read_write.c
+          # __do_execve_file() is also used by kernel_execve() with a NULL
+          # filename; skip the sucompat hook on that path.
+          sed -i 's/if (likely(susfs_is_current_proc_no_su()))/if (!filename || likely(susfs_is_current_proc_no_su()))/' fs/exec.c
 
           # Verify every hook OriginSU's inline check expects.
           grep -q 'ksu_handle_execveat' fs/exec.c
