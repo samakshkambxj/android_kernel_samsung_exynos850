@@ -3,14 +3,15 @@ name: Build Kernel (OriginSU)
 # Builds the Exynos850 (Galaxy A13 / SM-A135F) 4.19 kernel against the
 # *latest* OriginSU commit, using the Neutron toolchain.
 #
-# The kernel-side integration (manual hooks + SELinux symbol exports +
-# defconfig) lives in .github/originsu/kernel-integration.diff, so this repo
-# stays close to the vendor tree while OriginSU always tracks its latest
-# main branch at build time.
+# The kernel-side integration (SELinux exports + defconfig) lives in
+# .github/originsu/kernel-integration.diff, so this repo stays close to the
+# vendor tree while OriginSU always tracks its latest main branch at build
+# time. Without SuSFS the diff also installs OriginSU's manual hook call sites.
 #
 # SuSFS 2.3.0 (4.19 non-GKI backport) is applied at build time unless the
-# `susfs` input is "false". This tree backports the fs_context mount API, so
-# the vfs_kern_mount hunk is replaced by
+# `susfs` input is "false". It selects OriginSU's SuSFS inline-hook mode and
+# applies the pinned SuSFS inline-hook script. This tree backports the
+# fs_context mount API, so the vfs_kern_mount hunk is replaced by
 # .github/originsu/susfs-2.3.0-vfs-create-mount.diff.
 
 on:
@@ -127,7 +128,17 @@ jobs:
       - name: Apply OriginSU kernel integration
         run: |
           set -euo pipefail
-          if git apply --check .github/originsu/kernel-integration.diff 2>/dev/null; then
+          if [ "${{ github.event.inputs.susfs }}" != "false" ]; then
+            # SuSFS uses OriginSU's inline-hook mode. Keep only the non-hook
+            # integration here; the SuSFS step adds the inline hook call sites.
+            git apply --verbose \
+              --include='arch/arm64/configs/*' \
+              --include='drivers/Kconfig' \
+              --include='drivers/Makefile' \
+              --include='security/selinux/selinuxfs.c' \
+              --include='security/selinux/ss/services.c' \
+              .github/originsu/kernel-integration.diff
+          elif git apply --check .github/originsu/kernel-integration.diff 2>/dev/null; then
             git apply --verbose .github/originsu/kernel-integration.diff
           else
             echo "::warning::Integration patch did not apply cleanly (already applied or tree changed); continuing."
@@ -165,10 +176,35 @@ jobs:
 
           git apply .github/originsu/susfs-2.3.0-vfs-create-mount.diff
 
+          # OriginSU's SuSFS inline-hook mode uses the SuSFS project's hook
+          # call sites, not the manual-hook integration hunks. Apply the
+          # pinned inline-hook script and adapt ksu_handle_sys_read to
+          # OriginSU's three-argument signature.
+          INLINE_URL="https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/${SUSFS_PATCH_COMMIT}/Patches/susfs_inline_hook_patches.sh"
+          curl -fsSL "$INLINE_URL" -o /tmp/susfs_inline_hook_patches.sh
+          bash /tmp/susfs_inline_hook_patches.sh
+
+          sed -i 's/extern __attribute__((cold)) int ksu_handle_sys_read(unsigned int fd);/extern __attribute__((cold)) int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *count_ptr);/' fs/read_write.c
+          sed -i 's/ksu_handle_sys_read(fd);/ksu_handle_sys_read(fd, \&buf, \&count);/' fs/read_write.c
+
+          # Verify every hook OriginSU's inline check expects.
+          grep -q 'ksu_handle_execveat' fs/exec.c
+          grep -q 'ksu_handle_faccessat' fs/open.c
+          grep -q 'ksu_handle_stat' fs/stat.c
+          grep -q 'ksu_handle_sys_read' fs/read_write.c
+          grep -q 'ksu_handle_sys_reboot' kernel/reboot.c
+          grep -q 'ksu_handle_setresuid' kernel/sys.c
+          grep -q 'ksu_handle_input_handle_event' drivers/input/input.c
+
           DEFCONFIG="arch/arm64/configs/${{ github.event.inputs.defconfig || 'exynos850-a13nsxx_defconfig' }}"
+          sed -i -e '/^CONFIG_KSU_MANUAL_HOOK=y$/d' \
+                 -e '/^CONFIG_KSU_MANUAL_HOOK_AUTO_.*=y$/d' "$DEFCONFIG"
           printf '\nCONFIG_KSU_SUSFS=y\n' >> "$DEFCONFIG"
           grep -m1 'SUSFS_VERSION' include/linux/susfs.h
           grep -n 'CONFIG_KSU_SUSFS=y' "$DEFCONFIG"
+          grep -n 'ksu_handle_setresuid' kernel/sys.c
+          grep -n 'ksu_handle_sys_read' fs/read_write.c
+          grep -n 'ksu_handle_input_handle_event' drivers/input/input.c
 
           SUSFS_VERSION="$(sed -n 's/^#define SUSFS_VERSION "\(.*\)"/\1/p' include/linux/susfs.h)"
           {
@@ -176,6 +212,7 @@ jobs:
             echo ""
             echo "- version: \`${SUSFS_VERSION}\`"
             echo "- source: \`JackA1ltman/NonGKI_Kernel_Build_2nd@${SUSFS_PATCH_COMMIT}\` (4.19 non-GKI backport)"
+            echo "- mode: \`inline hook\`"
             echo "- mount-api compat: \`fs/namespace.c\` \`vfs_create_mount()\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -188,7 +225,12 @@ jobs:
 
           # Fail early if OriginSU did not end up enabled.
           grep -q '^CONFIG_KSU=y' "$OUT/.config"
-          grep -q '^CONFIG_KSU_MANUAL_HOOK=y' "$OUT/.config"
+          if [ "${{ github.event.inputs.susfs }}" != "false" ]; then
+            grep -q '^CONFIG_KSU_SUSFS=y' "$OUT/.config"
+            ! grep -q '^CONFIG_KSU_MANUAL_HOOK=y' "$OUT/.config"
+          else
+            grep -q '^CONFIG_KSU_MANUAL_HOOK=y' "$OUT/.config"
+          fi
           grep -q '^CONFIG_LOCALVERSION="-exynos850-Origin"' "$OUT/.config"
 
       - name: Build kernel
@@ -211,6 +253,7 @@ jobs:
           if [ "${{ github.event.inputs.susfs }}" != "false" ]; then
             grep -q '^CONFIG_KSU_SUSFS=y' "$OUT/.config"
             echo "SuSFS: $(grep -m1 'SUSFS_VERSION' include/linux/susfs.h)"
+            echo "susfs_* symbols in System.map: $(grep -c ' susfs_' "$OUT/System.map" || true)"
           fi
 
       - name: Collect artifacts
