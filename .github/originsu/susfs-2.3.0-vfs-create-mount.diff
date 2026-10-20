@@ -1,0 +1,37 @@
+From: OriginSU CI integration
+Subject: [PATCH] susfs: 2.3.0 compatibility with the backported fs_context mount API
+
+This Samsung 4.19 tree backports the fs_context mount API, so
+alloc_vfsmnt() is called from vfs_create_mount() instead of
+vfs_kern_mount(). The upstream SuSFS 4.19 patch hooks
+vfs_kern_mount(), which fails to apply here; this hunk moves the
+equivalent logic into vfs_create_mount().
+
+Apply after susfs_patch_to_4.19.patch (v2.3.0).
+
+diff --git a/fs/namespace.c b/fs/namespace.c
+--- a/fs/namespace.c
++++ b/fs/namespace.c
+@@ -1167,7 +1167,22 @@ struct vfsmount *vfs_create_mount(struct fs_context *fc)
+ 	if (!fc->root)
+ 		return ERR_PTR(-EINVAL);
+ 
++#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
++	/*
++	 * This tree backported the fs_context mount API, so alloc_vfsmnt()
++	 * happens here instead of in vfs_kern_mount().
++	 */
++	if (static_branch_unlikely(&susfs_is_sdcard_android_data_not_decrypted)) {
++		if (susfs_is_current_ksu_domain()) {
++			mnt = susfs_alloc_non_unshare_ksu_vfsmnt(fc->source ?: "none");
++			goto bypass_orig_flow;
++		}
++	}
++#endif
+ 	mnt = alloc_vfsmnt(fc->source ?: "none");
++#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
++bypass_orig_flow:
++#endif
+ 	if (!mnt)
+ 		return ERR_PTR(-ENOMEM);
+ 

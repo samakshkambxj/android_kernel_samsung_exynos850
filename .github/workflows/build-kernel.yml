@@ -7,6 +7,11 @@ name: Build Kernel (OriginSU)
 # defconfig) lives in .github/originsu/kernel-integration.diff, so this repo
 # stays close to the vendor tree while OriginSU always tracks its latest
 # main branch at build time.
+#
+# SuSFS 2.3.0 (4.19 non-GKI backport) is applied at build time unless the
+# `susfs` input is "false". This tree backports the fs_context mount API, so
+# the vfs_kern_mount hunk is replaced by
+# .github/originsu/susfs-2.3.0-vfs-create-mount.diff.
 
 on:
   workflow_dispatch:
@@ -23,6 +28,10 @@ on:
         description: 'Kernel defconfig name'
         required: false
         default: 'exynos850-a13nsxx_defconfig'
+      susfs:
+        description: 'Apply SuSFS 2.3.0 (4.19 non-GKI backport)'
+        required: false
+        default: 'true'
   push:
     branches: [originsu, lineage-24.0]
     paths-ignore:
@@ -128,6 +137,48 @@ jobs:
           grep -n "CONFIG_KSU=y\|CONFIG_KSU_MANUAL_HOOK=y\|CONFIG_LOCALVERSION" \
             arch/arm64/configs/${{ github.event.inputs.defconfig || 'exynos850-a13nsxx_defconfig' }}
 
+      - name: Apply SuSFS 2.3.0
+        if: ${{ github.event.inputs.susfs != 'false' }}
+        env:
+          SUSFS_PATCH_COMMIT: 118ac2bc4f8bc25a41f0aef0d766ddc977feaec3
+        run: |
+          set -euo pipefail
+          URL="https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/${SUSFS_PATCH_COMMIT}/Patches/Patch/susfs_patch_to_4.19.patch"
+          curl -fsSL "$URL" -o /tmp/susfs_patch_to_4.19.patch
+
+          # This Samsung tree backports the fs_context mount API, so exactly one
+          # hunk (vfs_kern_mount) is expected to reject. It is replaced by the
+          # fs_context-compatible compat patch below.
+          rm -f /tmp/susfs.rej
+          if ! patch -p1 -F3 --forward --no-backup-if-mismatch -r /tmp/susfs.rej \
+                < /tmp/susfs_patch_to_4.19.patch; then
+            echo "::notice::SuSFS patch reported rejects; checking them"
+          fi
+          if [ -s /tmp/susfs.rej ]; then
+            if ! grep -q 'vfs_kern_mount' /tmp/susfs.rej; then
+              echo "::error::Unexpected SuSFS rejects"
+              cat /tmp/susfs.rej
+              exit 1
+            fi
+            echo "::notice::Expected vfs_kern_mount reject; applying fs_context compat hunk"
+          fi
+
+          git apply .github/originsu/susfs-2.3.0-vfs-create-mount.diff
+
+          DEFCONFIG="arch/arm64/configs/${{ github.event.inputs.defconfig || 'exynos850-a13nsxx_defconfig' }}"
+          printf '\nCONFIG_KSU_SUSFS=y\n' >> "$DEFCONFIG"
+          grep -m1 'SUSFS_VERSION' include/linux/susfs.h
+          grep -n 'CONFIG_KSU_SUSFS=y' "$DEFCONFIG"
+
+          SUSFS_VERSION="$(sed -n 's/^#define SUSFS_VERSION "\(.*\)"/\1/p' include/linux/susfs.h)"
+          {
+            echo "### SuSFS"
+            echo ""
+            echo "- version: \`${SUSFS_VERSION}\`"
+            echo "- source: \`JackA1ltman/NonGKI_Kernel_Build_2nd@${SUSFS_PATCH_COMMIT}\` (4.19 non-GKI backport)"
+            echo "- mount-api compat: \`fs/namespace.c\` \`vfs_create_mount()\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Configure kernel
         run: |
           set -euo pipefail
@@ -157,6 +208,10 @@ jobs:
           grep -q 'exynos850-Origin' "$OUT/include/config/kernel.release"
           echo "ksu_* symbols in System.map: $(grep -c ' ksu_' "$OUT/System.map" || true)"
           echo "OriginSU commit: ${{ steps.originsu.outputs.short }}"
+          if [ "${{ github.event.inputs.susfs }}" != "false" ]; then
+            grep -q '^CONFIG_KSU_SUSFS=y' "$OUT/.config"
+            echo "SuSFS: $(grep -m1 'SUSFS_VERSION' include/linux/susfs.h)"
+          fi
 
       - name: Collect artifacts
         run: |
@@ -178,7 +233,7 @@ jobs:
       - name: Upload kernel artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: exynos850-Origin-kernel-${{ steps.originsu.outputs.short }}
+          name: exynos850-Origin-kernel-${{ steps.originsu.outputs.short }}${{ github.event.inputs.susfs == 'false' && '-nosusfs' || '-susfs' }}
           path: artifacts/
           if-no-files-found: error
           retention-days: 14
