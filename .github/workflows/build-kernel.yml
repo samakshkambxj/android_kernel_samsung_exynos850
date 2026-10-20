@@ -175,6 +175,8 @@ jobs:
           fi
 
           git apply .github/originsu/susfs-2.3.0-vfs-create-mount.diff
+          # This vendor tree has no show_options2() in struct super_operations.
+          git apply .github/originsu/susfs-2.3.0-no-show-options2.diff
 
           # OriginSU's SuSFS inline-hook mode uses the SuSFS project's hook
           # call sites, not the manual-hook integration hunks. Apply the

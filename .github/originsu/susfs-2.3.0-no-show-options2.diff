@@ -1,0 +1,33 @@
+From: OriginSU CI integration
+Subject: [PATCH] susfs: 2.3.0 compatibility for kernels without show_options2
+
+This tree's struct super_operations only provides show_options(), not
+show_options2(). The SuSFS 4.19 patch assumes show_options2() exists in
+its copied /proc/mounts helpers; fall back to show_options().
+
+Apply after susfs_patch_to_4.19.patch (v2.3.0).
+
+--- a/fs/proc_namespace.c
++++ b/fs/proc_namespace.c
+@@ -274,9 +274,7 @@
+ 	if (err)
+ 		goto out;
+ 	show_mnt_opts(m, mnt);
+-	if (sb->s_op->show_options2)
+-			err = sb->s_op->show_options2(mnt, m, mnt_path.dentry);
+-	else if (sb->s_op->show_options)
++	if (sb->s_op->show_options)
+ 		err = sb->s_op->show_options(m, mnt_path.dentry);
+ 	seq_puts(m, " 0 0\n");
+ out:
+@@ -341,9 +339,7 @@
+ 	err = show_sb_opts(m, sb);
+ 	if (err)
+ 		goto out;
+-	if (sb->s_op->show_options2) {
+-		err = sb->s_op->show_options2(mnt, m, mnt->mnt_root);
+-	} else if (sb->s_op->show_options)
++	if (sb->s_op->show_options)
+ 		err = sb->s_op->show_options(m, mnt->mnt_root);
+ 	seq_putc(m, '\n');
+ out:
