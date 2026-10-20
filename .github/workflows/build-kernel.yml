@@ -143,8 +143,11 @@ jobs:
       - name: Build kernel
         run: |
           set -euo pipefail
+          # Neutron clang promotes this pre-existing vendor warning (a char *
+          # passed to sizeof()) to an error; keep it as a warning.
           make -j"$(nproc)" ARCH="$ARCH" O="$OUT" LLVM=1 LLVM_IAS=1 \
-            CROSS_COMPILE=aarch64-linux-gnu- CLANG_TRIPLE=aarch64-linux-gnu-
+            CROSS_COMPILE=aarch64-linux-gnu- CLANG_TRIPLE=aarch64-linux-gnu- \
+            KCFLAGS="-Wno-error=sizeof-pointer-memaccess"
 
       - name: Verify image + OriginSU symbols
         run: |
